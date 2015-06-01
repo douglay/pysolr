@@ -30,9 +30,7 @@ Requirements
 
 * Python 2.6 - 3.3
 * Requests 2.0+
-* **Optional** - ``lxml``
 * **Optional** - ``simplejson``
-* **Optional** - ``cssselect`` for Tomcat error support
 
 
 Installation
@@ -45,7 +43,9 @@ PYTHONPATH.
 Usage
 =====
 
-Basic usage looks like::
+Basic usage looks like:
+
+.. code-block:: python
 
     # If on Python 2.X
     from __future__ import print_function
@@ -66,9 +66,6 @@ Basic usage looks like::
         },
     ])
 
-    # You can optimize the index when it gets fragmented, for better speed.
-    solr.optimize()
-
     # Later, searching is easy. In the simple case, just a plain Lucene-style
     # query is fine.
     results = solr.search('bananas')
@@ -80,7 +77,7 @@ Basic usage looks like::
 
     # Just loop over it to access the results.
     for result in results:
-        print("The title is '{0}'.".format(result['title'])
+        print("The title is '{0}'.".format(result['title']))
 
     # For a more advanced query, say involving highlighting, you can pass
     # additional options to Solr.

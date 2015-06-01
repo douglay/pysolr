@@ -2,15 +2,28 @@
 
 set -e
 
-if [ ! -f solr-4.6.0.tgz ]; then
-    curl -O http://archive.apache.org/dist/lucene/solr/4.6.0/solr-4.6.0.tgz
+SOLR_VERSION=4.7.2
+
+export SOLR_ARCHIVE="${SOLR_VERSION}.tgz"
+
+if [ -d "${HOME}/download-cache/" ]; then
+    export SOLR_ARCHIVE="${HOME}/download-cache/${SOLR_ARCHIVE}"
 fi
 
-echo "Extracting Solr 4.6.0 to solr4/"
+if [ -f ${SOLR_ARCHIVE} ]; then
+    # If the tarball doesn't extract cleanly, remove it so it'll download again:
+    tar -tf ${SOLR_ARCHIVE} > /dev/null || rm ${SOLR_ARCHIVE}
+fi
+
+if [ ! -f ${SOLR_ARCHIVE} ]; then
+    python get-solr-download-url.py $SOLR_VERSION | xargs curl -Lo $SOLR_ARCHIVE
+fi
+
+echo "Extracting Solr ${SOLR_VERSION} to solr4/"
 rm -rf solr4
 mkdir solr4
-tar -C solr4 -xf solr-4.6.0.tgz --strip-components 2 solr-4.6.0/example
-tar -C solr4 -xf solr-4.6.0.tgz --strip-components 1 solr-4.6.0/dist solr-4.6.0/contrib
+tar -C solr4 -xf ${SOLR_ARCHIVE} --strip-components 2 solr-${SOLR_VERSION}/example
+tar -C solr4 -xf ${SOLR_ARCHIVE} --strip-components 1 solr-${SOLR_VERSION}/dist solr-${SOLR_VERSION}/contrib
 
 echo "Configuring Solr"
 cd solr4

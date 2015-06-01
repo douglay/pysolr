@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
-from __future__ import print_function
-from __future__ import unicode_literals
-from __future__ import absolute_import
+from __future__ import absolute_import, print_function, unicode_literals
 
+import ast
 import datetime
 import logging
+import os
 import re
-import requests
 import time
-import types
-import ast
+# We can remove ExpatError when we drop support for Python 2.6:
+from xml.parsers.expat import ExpatError
+
+import requests
 
 try:
-    # Prefer lxml, if installed.
-    from lxml import etree as ET
+    from xml.etree import ElementTree as ET
 except ImportError:
-    try:
-        from xml.etree import cElementTree as ET
-    except ImportError:
-        raise ImportError("No suitable ElementTree implementation was found.")
+    raise ImportError("No suitable ElementTree implementation was found.")
+
+# Remove this when we drop Python 2.6:
+ParseError = getattr(ET, 'ParseError', SyntaxError)
 
 try:
     # Prefer simplejson, if installed.
@@ -41,6 +41,12 @@ except ImportError:
     import htmlentitydefs as htmlentities
 
 try:
+    # Python 3.X
+    from http.client import HTTPException
+except ImportError:
+    from httplib import HTTPException
+
+try:
     # Python 2.X
     unicode_char = unichr
 except NameError:
@@ -52,7 +58,7 @@ except NameError:
 
 __author__ = 'Daniel Lindsley, Joseph Kocherhans, Jacob Kaplan-Moss'
 __all__ = ['Solr']
-__version__ = (3, 2, 0)
+__version__ = (3, 3, 0)
 
 
 def get_version():
@@ -74,7 +80,7 @@ h = NullHandler()
 LOG.addHandler(h)
 
 # For debugging...
-if False:
+if os.environ.get("DEBUG_PYSOLR", "").lower() in ("true", "1"):
     LOG.setLevel(logging.DEBUG)
     stream = logging.StreamHandler()
     LOG.addHandler(stream)
@@ -290,14 +296,14 @@ class Solr(object):
         except AttributeError as err:
             raise SolrError("Unable to send HTTP method '{0}.".format(method))
 
+        # Everything except the body can be Unicode. The body must be
+        # encoded to bytes to work properly on Py3.
+        bytes_body = body
+
+        if bytes_body is not None:
+            bytes_body = force_bytes(body)
+
         try:
-            # Everything except the body can be Unicode. The body must be
-            # encoded to bytes to work properly on Py3.
-            bytes_body = body
-
-            if bytes_body is not None:
-                bytes_body = force_bytes(body)
-
             resp = requests_method(url, data=bytes_body, headers=headers, files=files,
                                    timeout=self.timeout)
         except requests.exceptions.Timeout as err:
@@ -309,6 +315,10 @@ class Solr(object):
             params = (url, err)
             self.log.error(error_message, *params, exc_info=True)
             raise SolrError(error_message % params)
+        except HTTPException as err:
+            error_message = "Unhandled error: %s %s: %s"
+            self.log.error(error_message, method, url, err, exc_info=True)
+            raise SolrError(error_message % (method, url, err))
 
         end_time = time.time()
         self.log.info("Finished '%s' (%s) with body '%s' in %0.3f seconds.",
@@ -351,7 +361,7 @@ class Solr(object):
         path = 'terms/?%s' % safe_urlencode(params, True)
         return self._send_request('get', path)
 
-    def _update(self, message, clean_ctrl_chars=True, commit=True, waitFlush=None, waitSearcher=None):
+    def _update(self, message, clean_ctrl_chars=True, commit=True, softCommit=False, waitFlush=None, waitSearcher=None):
         """
         Posts the given xml message to http://<self.url>/update and
         returns the result.
@@ -370,6 +380,8 @@ class Solr(object):
 
         if commit is not None:
             query_vars.append('commit=%s' % str(bool(commit)).lower())
+        elif softCommit is not None:
+            query_vars.append('softCommit=%s' % str(bool(softCommit)).lower())
 
         if waitFlush is not None:
             query_vars.append('waitFlush=%s' % str(bool(waitFlush)).lower())
@@ -391,15 +403,24 @@ class Solr(object):
         Extract the actual error message from a solr response.
         """
         reason = resp.headers.get('reason', None)
-        full_html = None
+        full_response = None
 
         if reason is None:
-            reason, full_html = self._scrape_response(resp.headers, resp.content)
+            try:
+                # if response is in json format
+                reason = resp.json()['error']['msg']
+            except KeyError:
+                # if json response has unexpected structure
+                full_response = resp.content
+            except ValueError:
+                # otherwise we assume it's html
+                reason, full_html = self._scrape_response(resp.headers, resp.content)
+                full_response = unescape_html(full_html)
 
         msg = "[Reason: %s]" % reason
 
         if reason is None:
-            msg += "\n%s" % unescape_html(full_html)
+            msg += "\n%s" % full_response
 
         return msg
 
@@ -415,35 +436,40 @@ class Solr(object):
             server_type = 'jetty'
 
         if server_string and 'coyote' in server_string.lower():
-            import lxml.html
             server_type = 'tomcat'
 
         reason = None
         full_html = ''
         dom_tree = None
 
+        if response.startswith('<?xml'):
+            # Try a strict XML parse
+            try:
+                soup = ET.fromstring(response)
+
+                reason_node = soup.find('lst[@name="error"]/str[@name="msg"]')
+                tb_node = soup.find('lst[@name="error"]/str[@name="trace"]')
+                if reason_node is not None:
+                    full_html = reason = reason_node.text.strip()
+                if tb_node is not None:
+                    full_html = tb_node.text.strip()
+                    if reason is None:
+                        reason = full_html
+
+                # Since we had a precise match, we'll return the results now:
+                if reason and full_html:
+                    return reason, full_html
+            except (ParseError, ExpatError):
+                # XML parsing error, so we'll let the more liberal code handle it.
+                pass
+
         if server_type == 'tomcat':
-            # Tomcat doesn't produce a valid XML response
-            soup = lxml.html.fromstring(response)
-            body_node = soup.find('body')
-            p_nodes = body_node.cssselect('p')
-
-            for p_node in p_nodes:
-                children = p_node.getchildren()
-
-                if len(children) >= 2 and 'message' in children[0].text.lower():
-                    reason = children[1].text
-
-                if len(children) >= 2 and hasattr(children[0], 'renderContents'):
-                    if 'description' in children[0].renderContents().lower():
-                        if reason is None:
-                            reason = children[1].renderContents()
-                        else:
-                            reason += ", " + children[1].renderContents()
-
-            if reason is None:
-                from lxml.html.clean import clean_html
-                full_html = clean_html(response)
+            # Tomcat doesn't produce a valid XML response or consistent HTML:
+            m = re.search(r'<(h1)[^>]*>\s*(.+?)\s*</\1>', response, re.IGNORECASE)
+            if m:
+                reason = m.group(2)
+            else:
+                full_html = "%s" % response
         else:
             # Let's assume others do produce a valid XML response
             try:
@@ -461,9 +487,10 @@ class Solr(object):
 
                 if reason is None:
                     full_html = ET.tostring(dom_tree)
-            except SyntaxError as err:
+            except (SyntaxError, ExpatError) as err:
                 full_html = "%s" % response
 
+        full_html = force_unicode(full_html)
         full_html = full_html.replace('\n', '')
         full_html = full_html.replace('\r', '')
         full_html = full_html.replace('<br/>', '')
@@ -699,7 +726,7 @@ class Solr(object):
         self.log.debug("Found '%d' Term suggestions results.", sum(len(j) for i, j in res.items()))
         return res
 
-    def _build_doc(self, doc, boost=None):
+    def _build_doc(self, doc, boost=None, fieldUpdates=None):
         doc_elem = ET.Element('doc')
 
         for key, value in doc.items():
@@ -719,6 +746,9 @@ class Solr(object):
 
                 attrs = {'name': key}
 
+                if fieldUpdates and key in fieldUpdates:
+                    attrs['update'] = fieldUpdates[key]
+
                 if boost and key in boost:
                     attrs['boost'] = force_unicode(boost[key])
 
@@ -729,7 +759,7 @@ class Solr(object):
 
         return doc_elem
 
-    def add(self, docs, commit=True, boost=None, commitWithin=None, waitFlush=None, waitSearcher=None):
+    def add(self, docs, boost=None, fieldUpdates=None, commit=True, softCommit=False, commitWithin=None, waitFlush=None, waitSearcher=None):
         """
         Adds or updates documents.
 
@@ -738,7 +768,11 @@ class Solr(object):
 
         Optionally accepts ``commit``. Default is ``True``.
 
+        Optionally accepts ``softCommit``. Default is ``False``.
+
         Optionally accepts ``boost``. Default is ``None``.
+
+        Optionally accepts ``fieldUpdates``. Default is ``None``.
 
         Optionally accepts ``commitWithin``. Default is ``None``.
 
@@ -767,7 +801,7 @@ class Solr(object):
             message.set('commitWithin', commitWithin)
 
         for doc in docs:
-            message.append(self._build_doc(doc, boost=boost))
+            message.append(self._build_doc(doc, boost=boost, fieldUpdates=fieldUpdates))
 
         # This returns a bytestring. Ugh.
         m = ET.tostring(message, encoding='utf-8')
@@ -776,7 +810,7 @@ class Solr(object):
 
         end_time = time.time()
         self.log.debug("Built add request of %s docs in %0.2f seconds.", len(message), end_time - start_time)
-        return self._update(m, commit=commit, waitFlush=waitFlush, waitSearcher=waitSearcher)
+        return self._update(m, commit=commit, softCommit=softCommit, waitFlush=waitFlush, waitSearcher=waitSearcher)
 
     def delete(self, id=None, q=None, commit=True, waitFlush=None, waitSearcher=None):
         """
@@ -809,7 +843,7 @@ class Solr(object):
 
         return self._update(m, commit=commit, waitFlush=waitFlush, waitSearcher=waitSearcher)
 
-    def commit(self, waitFlush=None, waitSearcher=None, expungeDeletes=None):
+    def commit(self, softCommit=False, waitFlush=None, waitSearcher=None, expungeDeletes=None):
         """
         Forces Solr to write the index data to disk.
 
@@ -818,6 +852,8 @@ class Solr(object):
         Optionally accepts ``waitFlush``. Default is ``None``.
 
         Optionally accepts ``waitSearcher``. Default is ``None``.
+
+        Optionally accepts ``softCommit``. Default is ``False``.
 
         Usage::
 
@@ -829,7 +865,7 @@ class Solr(object):
         else:
             msg = '<commit />'
 
-        return self._update(msg, waitFlush=waitFlush, waitSearcher=waitSearcher)
+        return self._update(msg, softCommit=softCommit, waitFlush=waitFlush, waitSearcher=waitSearcher)
 
     def optimize(self, waitFlush=None, waitSearcher=None, maxSegments=None):
         """
@@ -861,7 +897,7 @@ class Solr(object):
 
             http://wiki.apache.org/solr/ExtractingRequestHandler
 
-        The ExtractingRequestHandler has a very simply model: it extracts
+        The ExtractingRequestHandler has a very simple model: it extracts
         contents and metadata from the uploaded file and inserts it directly
         into the index. This is rarely useful as it allows no way to store
         additional data or otherwise customize the record. Instead, by default

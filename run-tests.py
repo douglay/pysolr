@@ -25,10 +25,10 @@ def start_solr():
 
         if status_code == 200:
             break
-        elif solr_retries < 30:
+        elif solr_retries < 60:
             solr_retries += 1
-            print("Waiting for Solr to start (retry #%d)" % solr_retries, file=sys.stderr)
-            time.sleep(3)
+            print("Waiting 10 seconds for Solr to start (retry #%d)" % solr_retries, file=sys.stderr)
+            time.sleep(10)
         else:
             print("Solr took too long to start (#%d retries)" % solr_retries, file=sys.stderr)
             sys.exit(1)
@@ -39,10 +39,10 @@ def start_solr():
 def main():
     solr_proc = start_solr()
 
-    if sys.version_info >= (3, 3):
+    if sys.version_info >= (3, 3) or sys.version_info >= (2, 7):
         cmd = ['python', '-m', 'unittest', 'tests']
     else:
-        cmd = ['python', '-m', 'unittest2', 'tests']
+        cmd = ['unit2', 'discover', '-s', 'tests', '-p', '[a-z]*.py']
 
     try:
         subprocess.check_call(cmd)
